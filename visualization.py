@@ -26,7 +26,7 @@ class ParkingVisualizer:
         self.width = width
         self.height = height
         self.screen = pygame.display.set_mode((width, height))
-        pygame.display.set_caption("Sistema de Estacionamento Autônomo - Controle Fuzzy")
+        pygame.display.set_caption("Sistema de Estacionamento Autônomo - Controle Fuzzy + Algoritmo Genético")
         
         self.simulation = simulation
         self.clock = pygame.time.Clock()
@@ -45,6 +45,10 @@ class ParkingVisualizer:
         self.simulation_speed = 1.0
 
         self.running = True
+        
+        self.info_scroll_offset = 0
+        self.info_content_height = 0
+        self.scroll_speed = 20
         
     def draw_vehicle(self, vehicle: Vehicle):
         """Desenha o veículo"""
@@ -69,7 +73,40 @@ class ParkingVisualizer:
         end_y = front_center[1] + indicator_length * math.sin(theta)
         pygame.draw.line(self.screen, YELLOW, front_center, (end_x, end_y), 3)
         
-    def draw_trajectory(self, vehicle: Vehicle):
+    def draw_trajectory(self, vehicle: Vehicle, ga_trajectory: Optional[List[Tuple[float, float, float]]] = None):
+        if ga_trajectory:
+            if len(ga_trajectory) > 1:
+                points = [(int(x), int(y)) for x, y, _ in ga_trajectory]
+                pygame.draw.lines(self.screen, GREEN, False, points, 2)
+            
+            for i, (x, y, angle) in enumerate(ga_trajectory):
+                if i % 10 == 0:
+                    alpha = i / len(ga_trajectory) if len(ga_trajectory) > 1 else 0
+                    color = (
+                        int(50 + 100 * alpha),
+                        int(200 + 55 * alpha),
+                        int(50 + 50 * alpha)
+                    )
+                    pygame.draw.circle(self.screen, color, (int(x), int(y)), 4)
+                    
+                    if i % 20 == 0 and i < len(ga_trajectory) - 1:
+                        angle_rad = math.radians(angle)
+                        arrow_len = 8
+                        end_x = x + arrow_len * math.cos(angle_rad)
+                        end_y = y + arrow_len * math.sin(angle_rad)
+                        pygame.draw.line(self.screen, GREEN, (int(x), int(y)), 
+                                       (int(end_x), int(end_y)), 2)
+            
+            if hasattr(self.simulation, 'hybrid_system') and self.simulation.hybrid_system:
+                if hasattr(self.simulation.hybrid_system, 'trajectory_tracker'):
+                    tracker = self.simulation.hybrid_system.trajectory_tracker
+                    if tracker.trajectory and tracker.current_index < len(tracker.trajectory):
+                        ref_x, ref_y, _ = tracker.trajectory[tracker.current_index]
+                        pygame.draw.line(self.screen, YELLOW, 
+                                       (int(vehicle.x), int(vehicle.y)),
+                                       (int(ref_x), int(ref_y)), 2)
+                        pygame.draw.circle(self.screen, YELLOW, (int(ref_x), int(ref_y)), 5)
+        
         if len(vehicle.trajectory) > 1:
             for i in range(1, len(vehicle.trajectory)):
                 alpha = i / len(vehicle.trajectory)
@@ -148,13 +185,55 @@ class ParkingVisualizer:
         self.screen.blit(text, (center[0] + radius + 5, center[1] - 10))
     
     def draw_info_panel(self, state: dict):
-        """Desenha o painel de informações lateral"""
         x_start = self.info_area.x + 10
-        y_pos = 10
+        y_start_base = 10
         
-        title = self.font_large.render("CONTROLE FUZZY", True, WHITE)
+        y_pos = y_start_base - self.info_scroll_offset
+        
+        clip_rect = pygame.Rect(self.info_area.x, self.info_area.y, 
+                               self.info_area.width - 15, self.info_area.height)
+        old_clip = self.screen.get_clip()
+        self.screen.set_clip(clip_rect)
+        
+        if state.get('use_hybrid', False):
+            title = self.font_large.render("SISTEMA HÍBRIDO (AG + FUZZY)", True, WHITE)
+        else:
+            title = self.font_large.render("CONTROLE FUZZY", True, WHITE)
         self.screen.blit(title, (x_start, y_pos))
         y_pos += 35
+        
+        if state.get('use_hybrid', False) and 'ga_parameters' in state:
+            ga_params = state['ga_parameters']
+            ga_title = self.font_medium.render("ALGORITMO GENÉTICO:", True, GREEN)
+            self.screen.blit(ga_title, (x_start, y_pos))
+            y_pos += 25
+            
+            ga_text = self.font_small.render(
+                f"k₀={ga_params['k0']:.3f}, k₁={ga_params['k1']:.3f}, Vₛ={ga_params['vs']}",
+                True, GREEN
+            )
+            self.screen.blit(ga_text, (x_start + 10, y_pos))
+            y_pos += 18
+            
+            perf_text = self.font_small.render(
+                f"|S|={ga_params['path_length']:.1f}px, |φ|max={ga_params['max_steering']:.1f}°",
+                True, GREEN
+            )
+            self.screen.blit(perf_text, (x_start + 10, y_pos))
+            y_pos += 20
+            
+            if hasattr(self.simulation.hybrid_system, 'trajectory_tracker'):
+                tracker = self.simulation.hybrid_system.trajectory_tracker
+                if tracker.trajectory:
+                    progress_pct = (tracker.progress / len(tracker.trajectory)) * 100
+                    progress_text = self.font_small.render(
+                        f"Progresso: {progress_pct:.1f}%",
+                        True, CYAN
+                    )
+                    self.screen.blit(progress_text, (x_start + 10, y_pos))
+                    y_pos += 18
+            
+            y_pos += 10
         
         pygame.draw.line(self.screen, GRAY, (x_start, y_pos), (x_start + 580, y_pos), 2)
         y_pos += 15
@@ -274,13 +353,65 @@ class ParkingVisualizer:
             "R: Reiniciar",
             "T: Mostrar/Ocultar Trajetória",
             "S: Mostrar/Ocultar Sensores",
-            "Q: Sair"
+            "Q: Sair",
+            "",
+            "SCROLL: Roda do mouse",
+            "↑/↓: Setas para rolar"
         ]
         
         for ctrl in controls:
-            ctrl_text = self.font_small.render(ctrl, True, GRAY)
-            self.screen.blit(ctrl_text, (x_start + 10, y_pos))
+            if ctrl:
+                ctrl_text = self.font_small.render(ctrl, True, GRAY)
+                self.screen.blit(ctrl_text, (x_start + 10, y_pos))
             y_pos += 18
+        
+        final_y_without_offset = y_pos + self.info_scroll_offset
+        self.info_content_height = final_y_without_offset - y_start_base + 20
+        
+        self.screen.set_clip(old_clip)
+        
+        self._draw_scrollbar()
+    
+    def _draw_scrollbar(self):
+        """Desenha a barra de scroll no painel de informações"""
+        if self.info_content_height <= self.info_area.height:
+            return
+        
+        scrollbar_width = 10
+        scrollbar_x = self.info_area.x + self.info_area.width - scrollbar_width - 5
+        
+        scrollbar_area = pygame.Rect(scrollbar_x, self.info_area.y, scrollbar_width, self.info_area.height)
+        
+        visible_ratio = self.info_area.height / self.info_content_height
+        thumb_height = max(20, int(self.info_area.height * visible_ratio))
+        max_scroll = self.info_content_height - self.info_area.height
+        scroll_ratio = self.info_scroll_offset / max_scroll if max_scroll > 0 else 0
+        thumb_y = self.info_area.y + int((self.info_area.height - thumb_height) * scroll_ratio)
+        
+        pygame.draw.rect(self.screen, DARK_GRAY, scrollbar_area)
+        
+        thumb_rect = pygame.Rect(scrollbar_x, thumb_y, scrollbar_width, thumb_height)
+        pygame.draw.rect(self.screen, GRAY, thumb_rect)
+        pygame.draw.rect(self.screen, WHITE, thumb_rect, 1)
+    
+    def _handle_scroll(self, event):
+        max_scroll = max(0, self.info_content_height - self.info_area.height)
+        
+        if max_scroll <= 0:
+            return
+        
+        if event.type == pygame.MOUSEWHEEL:
+            mouse_x, mouse_y = pygame.mouse.get_pos()
+            if self.info_area.collidepoint(mouse_x, mouse_y):
+                self.info_scroll_offset -= event.y * self.scroll_speed
+                self.info_scroll_offset = max(0, min(self.info_scroll_offset, max_scroll))
+                return
+        
+        if event.type == pygame.KEYDOWN:
+            if event.key == pygame.K_UP:
+                self.info_scroll_offset = max(0, self.info_scroll_offset - self.scroll_speed)
+            elif event.key == pygame.K_DOWN:
+                self.info_scroll_offset = min(self.info_scroll_offset + self.scroll_speed, max_scroll)
     
     def draw_bar(self, x: int, y: int, width: int, height: int, 
                  value: float, min_val: float, max_val: float, color: Tuple[int, int, int]):
@@ -334,7 +465,7 @@ class ParkingVisualizer:
                     self.paused = not self.paused
                 
                 elif event.key == pygame.K_r:
-                    self.simulation.reset_vehicle()
+                    self.simulation.reset_vehicle(random_position=True)
                 
                 elif event.key == pygame.K_t:
                     self.show_trajectory = not self.show_trajectory
@@ -344,6 +475,8 @@ class ParkingVisualizer:
                 
                 elif event.key == pygame.K_q:
                     self.running = False
+            
+            self._handle_scroll(event)
     
     def run(self):
         dt = 1.0 / self.fps
@@ -366,7 +499,8 @@ class ParkingVisualizer:
             self.draw_obstacles(state['obstacles'])
             
             if self.show_trajectory:
-                self.draw_trajectory(state['vehicle'])
+                ga_trajectory = state.get('ga_trajectory', None)
+                self.draw_trajectory(state['vehicle'], ga_trajectory)
             
             self.draw_vehicle(state['vehicle'])
             
@@ -391,9 +525,9 @@ class ParkingVisualizer:
 
 
 if __name__ == "__main__":
-    from fuzzy_system import create_parking_fuzzy_system
+    from fuzzy_centered import create_centered_parking_system
     
-    fis = create_parking_fuzzy_system()
+    fis = create_centered_parking_system()
     sim = ParkingSimulation(fis)
     
     viz = ParkingVisualizer(sim)

@@ -66,18 +66,21 @@ class Vehicle:
         return (self.x - dx, self.y - dy)
     
     def update_kinematics(self, dt: float):
-
+        """Atualiza cinemática do veículo usando modelo de bicicleta (Ackermann)."""
         if abs(self.velocity) < 0.01:
             return
         
         theta = math.radians(self.angle)
         delta = math.radians(self.steering_angle)
         
+        # Modelo de bicicleta: suporta movimento para frente e ré
         if abs(delta) > 0.001:
             turning_radius = self.wheelbase / math.tan(delta)
             
+            # Velocidade angular (omega)
             omega = self.velocity / turning_radius
             
+            # Movimento linear
             dx = self.velocity * math.cos(theta) * dt
             dy = self.velocity * math.sin(theta) * dt
             dtheta = omega * dt
@@ -86,12 +89,14 @@ class Vehicle:
             self.y += dy
             self.angle += math.degrees(dtheta)
         else:
+            # Movimento retilíneo
             dx = self.velocity * math.cos(theta) * dt
             dy = self.velocity * math.sin(theta) * dt
             
             self.x += dx
             self.y += dy
         
+        # Normaliza ângulo para [-180, 180]
         self.angle = (self.angle + 180) % 360 - 180
         
         self.trajectory.append((self.x, self.y))
@@ -201,8 +206,10 @@ class Obstacle:
 
 
 class ParkingSimulation:    
-    def __init__(self, fuzzy_system: FuzzyInferenceSystem):
+    def __init__(self, fuzzy_system: FuzzyInferenceSystem, hybrid_system=None):
         self.fuzzy_system = fuzzy_system
+        self.hybrid_system = hybrid_system  # Sistema híbrido (AG + Fuzzy)
+        self.use_hybrid = hybrid_system is not None
         
         self.width = 800
         self.height = 600
@@ -231,8 +238,25 @@ class ParkingSimulation:
             angle = -15
         
         self.vehicle = Vehicle(x, y, angle, length=50, width=25)
+        self.vehicle.trajectory = [(x, y)]  # Reseta a trajetória
         self.time_elapsed = 0.0
         self.control_updates = 0
+        
+        # Se estiver em modo híbrido e for posição aleatória, reotimiza a trajetória
+        if self.use_hybrid and self.hybrid_system and random_position:
+            new_pose = (x, y, angle)
+            print(f"\n[RESET] Nova posição: ({x:.1f}, {y:.1f}), ângulo: {angle:.1f}°")
+            print("[RESET] Executando AG para otimizar nova trajetória...")
+            
+            # Reotimiza com configuração mais rápida (menos gerações para não demorar)
+            self.hybrid_system.reoptimize_trajectory(
+                new_initial_pose=new_pose,
+                population_size=30,  # Reduzido para ser mais rápido
+                generations=50,       # Reduzido para ser mais rápido
+                verbose=True
+            )
+            
+            print("[RESET] ✓ Nova trajetória pronta!\n")
     
     def update(self, dt: float) -> bool:
         self.time_elapsed += dt
@@ -246,23 +270,34 @@ class ParkingSimulation:
             self.vehicle.velocity = 0.0
             return False
         
-        fuzzy_inputs = {
-            "distancia_frontal": self.vehicle.sensor_front,
-            "distancia_lateral": self.vehicle.sensor_lateral,
-            "angulo_veiculo": self.vehicle.sensor_angle,
-            "profundidade_vaga": self.vehicle.sensor_depth
-        }
-        
-        fuzzy_outputs = self.fuzzy_system.infer(fuzzy_inputs)
-        
-        if 60 <= self.vehicle.sensor_depth <= 90:
-            distance_from_center = abs(self.vehicle.sensor_depth - 75)
+        # Usa sistema híbrido se disponível, senão usa Fuzzy puro
+        if self.use_hybrid:
+            fuzzy_outputs = self.hybrid_system.get_fuzzy_control(self.vehicle, use_tracking=True)
+            # No modo híbrido, apenas verifica parada final (não override agressivo)
+            if 60 <= self.vehicle.sensor_depth <= 90:
+                distance_from_center = abs(self.vehicle.sensor_depth - 75)
+                if distance_from_center <= 8:
+                    # Muito próximo do centro, para
+                    fuzzy_outputs["velocidade"] = 0.0
+                    fuzzy_outputs["angulo_direcao"] = 0.0
+        else:
+            fuzzy_inputs = {
+                "distancia_frontal": self.vehicle.sensor_front,
+                "distancia_lateral": self.vehicle.sensor_lateral,
+                "angulo_veiculo": self.vehicle.sensor_angle,
+                "profundidade_vaga": self.vehicle.sensor_depth
+            }
+            fuzzy_outputs = self.fuzzy_system.infer(fuzzy_inputs)
             
-            if distance_from_center <= 10:
-                fuzzy_outputs["velocidade"] = 0.0
-                fuzzy_outputs["angulo_direcao"] = 0.0
-            else:
-                fuzzy_outputs["velocidade"] = min(fuzzy_outputs["velocidade"], 5.0)
+            # Lógica de override original para modo Fuzzy puro
+            if 60 <= self.vehicle.sensor_depth <= 90:
+                distance_from_center = abs(self.vehicle.sensor_depth - 75)
+                
+                if distance_from_center <= 10:
+                    fuzzy_outputs["velocidade"] = 0.0
+                    fuzzy_outputs["angulo_direcao"] = 0.0
+                else:
+                    fuzzy_outputs["velocidade"] = min(fuzzy_outputs["velocidade"], 5.0)
         
         self.vehicle.steering_angle = fuzzy_outputs["angulo_direcao"]
         self.vehicle.velocity = fuzzy_outputs["velocidade"]
@@ -271,13 +306,13 @@ class ParkingSimulation:
         
         self.vehicle.update_kinematics(dt)
         
-        if self.time_elapsed > 30.0:
+        if self.time_elapsed > 40.0:
             return False
         
         return True
     
     def get_state(self) -> dict:
-        return {
+        state = {
             'vehicle': self.vehicle,
             'parking_spot': self.parking_spot,
             'obstacles': self.obstacles,
@@ -294,8 +329,18 @@ class ParkingSimulation:
                 'velocidade': self.vehicle.velocity
             },
             'is_parked': self.vehicle.is_parked,
-            'is_colliding': self.vehicle.is_colliding
+            'is_colliding': self.vehicle.is_colliding,
+            'use_hybrid': self.use_hybrid
         }
+        
+        # Adiciona informações do AG se disponível
+        if self.use_hybrid and self.hybrid_system:
+            ga_params = self.hybrid_system.get_ga_parameters()
+            if ga_params:
+                state['ga_parameters'] = ga_params
+            state['ga_trajectory'] = self.hybrid_system.get_ga_trajectory()
+        
+        return state
 
 
 if __name__ == "__main__":
