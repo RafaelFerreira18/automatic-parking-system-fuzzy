@@ -214,7 +214,6 @@ class GeneticAlgorithm:
         return population[selected_idx].copy()
     
     def _crossover(self, parent1: List[int], parent2: List[int]) -> Tuple[List[int], List[int]]:
-        """Cruzamento de um ponto."""
         if np.random.random() > self.crossover_rate:
             return parent1.copy(), parent2.copy()
         
@@ -226,7 +225,6 @@ class GeneticAlgorithm:
         return child1, child2
     
     def _mutate(self, chromosome: List[int]) -> List[int]:
-        """Mutação bit-flip."""
         mutated = chromosome.copy()
         
         for i in range(len(mutated)):
@@ -269,8 +267,8 @@ class GeneticAlgorithm:
                 _, path_length, max_steering = self._generate_trajectory(k0, k1, vs)
                 print(f"Geração {generation+1:3d}/{self.generations} | "
                       f"Melhor Fitness: {-best_fitness:.4f} | "
-                      f"|S|: {path_length:.2f} | |φ|max: {max_steering:.2f}° | "
-                      f"k₀: {k0:.4f}, k₁: {k1:.4f}, Vₛ: {vs}")
+                      f"|S|: {path_length:.2f} | |phi|max: {max_steering:.2f} deg | "
+                      f"k0: {k0:.4f}, k1: {k1:.4f}, Vs: {vs}")
             
             new_population = []
             
